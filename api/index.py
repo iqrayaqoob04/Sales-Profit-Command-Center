@@ -11,10 +11,17 @@ from flask import Flask, request
 ROOT = Path(__file__).resolve().parents[1]
 DATA_FILE = ROOT / "superstore_cleaned.csv"
 app = Flask(__name__)
+DATA = None
 
 
 def load_data():
-    data = pd.read_csv(DATA_FILE)
+    data_file = next(
+        (path for path in (DATA_FILE, Path.cwd() / "superstore_cleaned.csv") if path.exists()),
+        None,
+    )
+    if data_file is None:
+        raise FileNotFoundError("superstore_cleaned.csv was not included in the deployment")
+    data = pd.read_csv(data_file)
     data["Order Date"] = pd.to_datetime(data["Order Date"])
     data["Year"] = data["Order Date"].dt.year
     data["Quarter"] = data["Order Date"].dt.quarter
@@ -23,7 +30,11 @@ def load_data():
     return data
 
 
-DATA = load_data()
+def get_data():
+    global DATA
+    if DATA is None:
+        DATA = load_data()
+    return DATA
 
 
 def chart_html(figure):
@@ -38,6 +49,7 @@ def chart_html(figure):
 
 
 def query_result(query):
+    data = get_data()
     normalized = query.lower().strip()
 
     if any(phrase in normalized for phrase in ("what the dashboard about", "what is this dashboard", "purpose of dashboard")):
@@ -47,11 +59,11 @@ def query_result(query):
         )
 
     if "profit drop" in normalized and "quarter" in normalized:
-        quarters = sorted(DATA["Year-Quarter"].dropna().unique())
+        quarters = sorted(data["Year-Quarter"].dropna().unique())
         if len(quarters) < 2:
             return "There are not enough quarters for a comparison.", None
         latest_quarter, previous_quarter = quarters[-1], quarters[-2]
-        quarterly = DATA.groupby(["Region", "Year-Quarter"], as_index=False)["Profit"].sum()
+        quarterly = data.groupby(["Region", "Year-Quarter"], as_index=False)["Profit"].sum()
         pivot = quarterly.pivot(index="Region", columns="Year-Quarter", values="Profit").fillna(0)
         pivot["Change"] = pivot[latest_quarter] - pivot[previous_quarter]
         result = pivot.sort_values("Change")
@@ -72,7 +84,7 @@ def query_result(query):
         number = min(int(number_match.group()) if number_match else 5, 25)
         metric = "Sales" if "sales" in normalized else "Profit"
         level = "State" if "state" in normalized else "Region"
-        top_data = DATA.groupby(level, as_index=False)[metric].sum().sort_values(metric, ascending=False).head(number)
+        top_data = data.groupby(level, as_index=False)[metric].sum().sort_values(metric, ascending=False).head(number)
         answer = "Top {} {}s by {}: {}".format(
             number,
             level,
@@ -90,9 +102,10 @@ def query_result(query):
 
 
 def page(query="", answer="", chart=""):
-    sales = DATA["Sales"].sum()
-    profit = DATA["Profit"].sum()
-    orders = DATA["Order ID"].nunique()
+    data = get_data()
+    sales = data["Sales"].sum()
+    profit = data["Profit"].sum()
+    orders = data["Order ID"].nunique()
     cards = "".join(
         f'<div class="card"><small>{label}</small><strong>{value}</strong></div>'
         for label, value in (
@@ -102,9 +115,9 @@ def page(query="", answer="", chart=""):
             ("Average Order Value", f"${sales / orders:,.0f}"),
         )
     )
-    region = DATA.groupby("Region", as_index=False)["Sales"].sum().sort_values("Sales", ascending=False)
+    region = data.groupby("Region", as_index=False)["Sales"].sum().sort_values("Sales", ascending=False)
     region_figure = px.bar(region, x="Region", y="Sales", color="Region", title="Sales by Region")
-    monthly = DATA.groupby("Year-Month", as_index=False).agg(Total_Sales=("Sales", "sum"), Total_Profit=("Profit", "sum"))
+    monthly = data.groupby("Year-Month", as_index=False).agg(Total_Sales=("Sales", "sum"), Total_Profit=("Profit", "sum"))
     monthly_figure = px.line(monthly.sort_values("Year-Month"), x="Year-Month", y=["Total_Sales", "Total_Profit"], markers=True, title="Monthly Sales and Profit")
     chart_blocks = chart_html(region_figure) + chart_html(monthly_figure)
     result = ""
